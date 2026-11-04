@@ -1,0 +1,64 @@
+name: Pick runner
+
+# Chooses a runner label for the caller's jobs: GitHub-hosted while the org still
+# has included Actions minutes this month, Blacksmith once they are used up.
+# The picker itself runs on Blacksmith because a GitHub-hosted job would not start
+# once the minutes are gone, and any failure to read billing falls back to
+# Blacksmith so CI never gets blocked.
+#
+# Usage:
+#   jobs:
+#     runner:
+#       uses: metacognitive-therapy/ci-workflows/.github/workflows/pick-runner.yml@v1
+#       secrets: inherit
+#     build:
+#       needs: runner
+#       runs-on: ${{ needs.runner.outputs.label }}
+
+on:
+  workflow_call:
+    inputs:
+      github-runner:
+        type: string
+        default: ubuntu-24.04
+      blacksmith-runner:
+        type: string
+        default: blacksmith-2vcpu-ubuntu-2404
+    secrets:
+      BILLING_TOKEN:
+        description: Fine-grained PAT with org Administration read, used to read Actions usage
+        required: false
+    outputs:
+      label:
+        description: Runner label for the caller's jobs
+        value: ${{ jobs.pick.outputs.label }}
+
+jobs:
+  pick:
+    runs-on: blacksmith-2vcpu-ubuntu-2404
+    outputs:
+      label: ${{ steps.pick.outputs.label }}
+    steps:
+      - name: Pick runner from Actions minutes used this month
+        id: pick
+        env:
+          GH_TOKEN: ${{ secrets.BILLING_TOKEN }}
+          ORG: ${{ github.repository_owner }}
+          MINUTES_LIMIT: ${{ vars.ACTIONS_MINUTES_LIMIT || 1950 }}
+          GITHUB_RUNNER: ${{ inputs.github-runner }}
+          BLACKSMITH_RUNNER: ${{ inputs.blacksmith-runner }}
+        run: |
+          used=$(gh api "/organizations/$ORG/settings/billing/usage/summary" \
+            --jq '[.usageItems[] | select(.sku == "actions_linux") | .grossQuantity] | add // 0') || used=""
+
+          if [ -z "$used" ]; then
+            echo "::warning::Could not read Actions usage, falling back to Blacksmith"
+            label="$BLACKSMITH_RUNNER"
+          elif awk -v u="$used" -v l="$MINUTES_LIMIT" 'BEGIN { exit !(u < l) }'; then
+            label="$GITHUB_RUNNER"
+          else
+            label="$BLACKSMITH_RUNNER"
+          fi
+
+          echo "Linux minutes used: ${used:-unknown} / $MINUTES_LIMIT -> $label"
+          echo "label=$label" >> "$GITHUB_OUTPUT"
